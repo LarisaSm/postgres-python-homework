@@ -1,6 +1,6 @@
 import os
 import psycopg2
-from decimal import Decimal
+from decimal import Context, Decimal, InvalidOperation
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,7 +31,8 @@ def create_tables(cur):
             id SERIAL PRIMARY KEY,
             user_id INT NOT NULL
                 REFERENCES users(id) ON DELETE CASCADE,
-            amount NUMERIC(10,2) NOT NULL,
+            amount NUMERIC(10,2) NOT NULL
+                CONSTRAINT orders_amount_not_nan CHECK (amount <> 'NaN'::numeric),
             created_at TIMESTAMP DEFAULT NOW(),
             order_uid UUID NOT NULL UNIQUE
         );
@@ -55,14 +56,37 @@ def add_user(cur, name, age, email):
         return result[0]
 
     cur.execute(
-        "SELECT id FROM users WHERE email = %s;",
+        "SELECT id, name, age FROM users WHERE email = %s FOR KEY SHARE;",
         (email,),
     )
-    return cur.fetchone()[0]
+    existing = cur.fetchone()
+    if existing is None:
+        raise RuntimeError(
+            f"Пользователь с email {email} исчез после конфликта. Повторите операцию."
+        )
+
+    existing_id, existing_name, existing_age = existing
+    if (existing_name, existing_age) != (name, age):
+        raise ValueError(
+            f"Конфликт пользователя {email}: имя или возраст отличаются"
+        )
+    return existing_id
 
 
 def add_order(cur, user_id, amount, order_uid):
-    amount = Decimal(str(amount))
+    try:
+        amount = Decimal(str(amount))
+    except InvalidOperation as error:
+        raise ValueError("Сумма заказа должна быть числом") from error
+
+    max_amount = Decimal("99999999.99")
+    if not amount.is_finite() or not -max_amount <= amount <= max_amount:
+        raise ValueError("Сумма заказа должна быть конечной и в диапазоне ±99999999.99")
+
+    normalized_amount = amount.quantize(Decimal("0.01"), context=Context(prec=10))
+    if normalized_amount != amount:
+        raise ValueError("Сумма заказа должна быть указана с точностью до копейки")
+    amount = normalized_amount
     order_uid = str(order_uid)
 
     # Пытаемся добавить заказ
@@ -79,7 +103,6 @@ def add_order(cur, user_id, amount, order_uid):
     result = cur.fetchone()
 
     if result:
-        print(f"Создан новый заказ ID: {result[0]}")
         return result[0]
 
     # Заказ с таким UUID уже существует
@@ -108,7 +131,6 @@ def add_order(cur, user_id, amount, order_uid):
             "UUID существует, но пользователь или сумма отличаются"
         )
 
-    print(f"Заказ ID {existing_id} уже существует, пропускаем.")
     return existing_id
 
 

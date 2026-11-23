@@ -1,50 +1,59 @@
-from postgres_driver import connect_db, add_order
+import unittest
+from uuid import uuid4
 
-conn = None
+import psycopg2
 
-try:
-    conn = connect_db()
+from postgres_driver import add_order, add_user, connect_db, create_tables
 
-    with conn.cursor() as cur:
-        # Находим тестовый заказ по его UUID
-        cur.execute(
-            """
-            SELECT user_id, amount
-            FROM orders
-            WHERE order_uid = %s;
-            """,
-            ("11111111-1111-4111-8111-111111111111",),
+
+class OrderConflictTest(unittest.TestCase):
+    def setUp(self):
+        conn = connect_db()
+        self.addCleanup(conn.close)
+        self.addCleanup(conn.rollback)
+        self.cur = conn.cursor()
+        self.addCleanup(self.cur.close)
+
+        self.cur.execute("CREATE TEMP TABLE test_session (id INT);")
+        self.cur.execute("SET LOCAL search_path TO pg_temp;")
+        create_tables(self.cur)
+        self.user_id = add_user(self.cur, "Алиса", 28, "alice@example.com")
+
+    def test_repeat_and_conflict(self):
+        order_uid = uuid4()
+        order_id = add_order(self.cur, self.user_id, "499.90", order_uid)
+        self.assertEqual(
+            add_order(self.cur, self.user_id, "499.900", order_uid), order_id
         )
+        with self.assertRaisesRegex(ValueError, "Конфликт заказа"):
+            add_order(self.cur, self.user_id, "599.90", order_uid)
 
-        order = cur.fetchone()
+        self.cur.execute("SELECT COUNT(*) FROM orders;")
+        self.assertEqual(self.cur.fetchone()[0], 1)
 
-        if order is None:
-            raise RuntimeError(
-                "Тестовый заказ не найден. "
-                "Сначала выполните python main.py --seed"
+    def test_invalid_amounts(self):
+        for amount in ("bad", "NaN", "Infinity", "100000000.00", "1.005"):
+            with self.subTest(amount=amount):
+                with self.assertRaisesRegex(ValueError, "Сумма заказа"):
+                    add_order(self.cur, self.user_id, amount, uuid4())
+
+        self.cur.execute("SELECT COUNT(*) FROM orders;")
+        self.assertEqual(self.cur.fetchone()[0], 0)
+
+    def test_database_rejects_nan(self):
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self.cur.execute(
+                "INSERT INTO orders (user_id, amount, order_uid) VALUES (%s, %s, %s);",
+                (self.user_id, "NaN", str(uuid4())),
             )
 
-        user_id, original_amount = order
+    def test_repeat_user_requires_matching_data(self):
+        self.assertEqual(
+            add_user(self.cur, "Алиса", 28, "alice@example.com"), self.user_id
+        )
+        with self.assertRaisesRegex(ValueError, "Конфликт пользователя"):
+            add_user(self.cur, "Алиса", 29, "alice@example.com")
 
-        # Пробуем повторно использовать UUID с другой суммой
-        try:
-            add_order(
-                cur,
-                user_id=user_id,
-                amount=original_amount + 100,
-                order_uid="11111111-1111-4111-8111-111111111111",
-            )
 
-        except ValueError as error:
-            assert "Конфликт заказа" in str(error)
-            print("ТЕСТ ПРОЙДЕН: конфликт UUID обнаружен")
-
-        else:
-            raise AssertionError(
-                "ТЕСТ НЕ ПРОЙДЕН: конфликт UUID не обнаружен"
-            )
-
-finally:
-    if conn is not None:
-        conn.close()
-        print("Соединение закрыто.")
+if __name__ == "__main__":
+    unittest.main()

@@ -1,4 +1,6 @@
 import argparse
+import sys
+
 import psycopg2
 
 from postgres_driver import connect_db, create_tables, get_user_totals
@@ -27,6 +29,9 @@ def main():
                 if args.seed:
                     seed_data(cur)
 
+        if args.seed:
+            print("Демонстрационные данные проверены и сохранены.")
+
         with conn.cursor() as cur:
             totals = get_user_totals(cur)
 
@@ -37,16 +42,20 @@ def main():
                 print(f"{name} — {total:.2f}")
 
     except psycopg2.Error as error:
-        print(f"Ошибка PostgreSQL: {error}")
+        print(f"Ошибка PostgreSQL: {error}", file=sys.stderr)
+        return 1
 
     except (ValueError, RuntimeError) as error:
-        print(f"Ошибка данных: {error}")
+        print(f"Ошибка данных: {error}", file=sys.stderr)
+        return 1
 
     finally:
         if conn is not None:
             conn.close()
             print("\nСоединение закрыто.")
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

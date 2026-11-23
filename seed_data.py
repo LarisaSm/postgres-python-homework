@@ -34,5 +34,3 @@ def seed_data(cur):
 
     for email, amount, order_uid in orders:
         add_order(cur, user_ids[email], amount, order_uid)
-
-    print("Тестовые данные проверены и добавлены при необходимости.")
